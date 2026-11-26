@@ -38,6 +38,7 @@
     pageNumbers: true,
     header: true,
     sectionBreaks: false,
+    stampSpace: true,
     cover: false,
     keyTerms: false,
     coverName: "",
@@ -48,7 +49,7 @@
 
   var MARGINS = { narrow: 10, normal: 18, wide: 25 };
 
-  var state = { settings: load(), root: null, sheet: null, data: null };
+  var state = { settings: load(), root: null, sheet: null, data: null, packData: [], packInfo: null };
 
   /* ------------------------------------------------------------------ *
    * Helpers
@@ -256,6 +257,67 @@
     return out;
   }
 
+  /* Read every member through Revisian's own delegated pack navigation. */
+  function dispatchAppAction(action) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.hidden = true;
+    button.setAttribute("data-action", action);
+    document.body.appendChild(button);
+    button.click();
+    button.remove();
+  }
+
+  function collectPack() {
+    var article = document.querySelector("main article");
+    if (!article) return [];
+    var buttons = article.querySelectorAll('.pack-contents button[data-action^="pack-item:"]');
+    var restoreTitle = "";
+    if (!buttons.length) {
+      var backToPack = article.querySelector('.field-back button[data-action^="open:"]');
+      var openPackAction = backToPack && backToPack.getAttribute("data-action");
+      var openNote = article.querySelector("h1");
+      if (!openPackAction || !openNote) return [];
+      restoreTitle = clean(openNote.textContent);
+      dispatchAppAction(openPackAction);
+      article = document.querySelector("main article");
+      buttons = article && article.querySelectorAll('.pack-contents button[data-action^="pack-item:"]');
+    }
+    if (!buttons || !buttons.length) return [];
+    var packHeading = article.querySelector("h1");
+    state.packInfo = packHeading ? { title: clean(packHeading.textContent), subject: (article.querySelector(".doc-meta .pill") || {}).textContent || "" } : null;
+    var actions = Array.prototype.map.call(buttons, function (button) {
+      return button.getAttribute("data-action");
+    });
+    var items = [];
+    actions.forEach(function (action) {
+      dispatchAppAction(action);
+      var note = readNote();
+      if (note) {
+        items.push({ title: note.title, subject: note.subject, html: bodyHtml(note), terms: note.terms.slice() });
+      } else {
+        var memberArticle = document.querySelector("main article");
+        var memberTitle = memberArticle && memberArticle.querySelector("h1");
+        if (!memberArticle || !memberTitle) throw new Error("A pack member could not be rendered for printing.");
+        var memberCopy = memberArticle.cloneNode(true);
+        Array.prototype.forEach.call(memberCopy.querySelectorAll("h1, button, svg, script, style, input, textarea"), function (el) { el.remove(); });
+        items.push({ title: clean(memberTitle.textContent), subject: "", html: sanitise(memberCopy), terms: [] });
+      }
+      var back = document.querySelector('main article .field-back button[data-action^="open:"]');
+      if (!back) throw new Error("Pack navigation could not return to the pack.");
+      dispatchAppAction(back.getAttribute("data-action"));
+    });
+    if (restoreTitle) {
+      var packButtons = document.querySelectorAll('main article .pack-contents button[data-action^="pack-item:"]');
+      var restoreButton = Array.prototype.find.call(packButtons, function (button) {
+        var title = button.querySelector("strong");
+        return title && clean(title.textContent) === restoreTitle;
+      });
+      if (restoreButton) dispatchAppAction(restoreButton.getAttribute("data-action"));
+    }
+    return items;
+  }
+
   /* ------------------------------------------------------------------ *
    * Build the printable sheet
    * ------------------------------------------------------------------ */
@@ -303,8 +365,30 @@
     var s = state.settings;
     var data = (state.data = readNote());
     if (!data) return null;
+    if (state.packData.length && state.packInfo) {
+      data.title = state.packInfo.title;
+      data.subject = clean(state.packInfo.subject);
+    }
     var html = "";
     if (s.cover) html += coverHtml(data);
+    if (state.packData.length) {
+      html += '<article class="rpr-doc rpr-pack-doc"><header class="rpr-title">';
+      if (!s.cover) {
+        if (data.subject) html += '<p class="rpr-kicker">' + esc(data.subject) + "</p>";
+        html += "<h1>" + esc(data.title) + "</h1>";
+      }
+      html += "</header><div class=\"rpr-pack-contents\">";
+      state.packData.forEach(function (item, index) {
+        html += '<section class="rpr-pack-item' + (index ? " rpr-pack-page" : "") + '">';
+        if (item.subject) html += '<p class="rpr-kicker">' + esc(item.subject) + "</p>";
+        html += "<h2>" + esc(item.title) + "</h2><div class=\"rpr-body\">" + item.html + "</div>";
+        if (s.keyTerms && item.terms.length) html += termsHtml({ terms: item.terms });
+        if (s.stampSpace) html += '<div class="rpr-stamp-space"><span>Teacher stamp / feedback</span></div>';
+        html += "</section>";
+      });
+      html += "</div></article>";
+      return html;
+    }
     html += '<article class="rpr-doc"><header class="rpr-title">';
     if (!s.cover) {
       if (data.subject) html += '<p class="rpr-kicker">' + esc(data.subject) + "</p>";
@@ -441,13 +525,14 @@
       toggle("inkSaver", "Ink saver", "Black text on white, greyscale images, no coloured backgrounds.") +
       toggle("images", "Include images", "Turn off to save ink and paper.") +
       toggle("showUrls", "Write out link addresses", "Links stay readable on paper.") +
+      toggle("stampSpace", "Stamp / feedback space", "Leaves a labelled area at the end of every pack item.") +
       "<h3>Project layout</h3>" +
       toggle("cover", "Cover page", "Title, name, class, teacher and date.") +
       '<div class="rpr-cover-fields" hidden>' +
       text("coverName", "Your name") + text("coverClass", "Class / subject") + text("coverTeacher", "Teacher") +
       field("Date (blank = today)", '<input type="text" data-key="coverDate" value="' + esc(s.coverDate) + '" maxlength="40" placeholder="' + esc(today()) + '">') +
       "</div>" +
-      toggle("header", "Running title", "Note title at the top of every page.") +
+      toggle("header", "Running title", "Note title at the top of every page." ) +
       toggle("pageNumbers", "Page numbers", "Shown as 1 / 4 in Chrome and Edge.") +
       toggle("sectionBreaks", "New page for each section", "Starts every main heading on a fresh page.") +
       toggle("keyTerms", "Key terms list", "Adds the note’s bold terms at the end.") +
@@ -466,6 +551,20 @@
         toast.textContent = "Open a note first, then choose Print mode.";
         toast.setAttribute("data-show", "1");
         setTimeout(function () { toast.removeAttribute("data-show"); }, 3000);
+      }
+      return;
+    }
+    state.packInfo = null;
+    try {
+      state.packData = collectPack();
+    } catch (err) {
+      state.packData = [];
+      state.packInfo = null;
+      var toast = document.getElementById("toast");
+      if (toast) {
+        toast.textContent = "Could not load every pack item. Open the pack overview and try again.";
+        toast.setAttribute("data-show", "1");
+        setTimeout(function () { toast.removeAttribute("data-show"); }, 4000);
       }
       return;
     }
@@ -560,7 +659,7 @@
     btn.type = "button";
     btn.className = "btn outline rpr-launch";
     btn.setAttribute("data-print-mode", "1");
-    btn.title = "Print mode (Alt+Shift+P)";
+    btn.title = "Print entire pack (Ctrl+Alt+Shift+P)";
     btn.innerHTML = printerSvg + "<span>Print</span>";
     var present = host.querySelector("[data-present]");
     var trigger = host.querySelector('[data-action="revision-styles"]');
@@ -582,7 +681,7 @@
     btn.innerHTML =
       "<span>" + printerSvg.replace('viewBox="0 0 24 24"', 'viewBox="0 0 24 24" width="17" height="17"') + "</span>" +
       "<span><strong>Print mode</strong>" +
-      "<small>Lay this note out for paper: page size, ink saver, binding edge, cover page and page numbers.</small></span>";
+      "<small>Print-friendly page size, margins, binding edge, cover page, ink saver and page numbers. Use Ctrl+Alt+Shift+P to print.</small></span>";
     choices.appendChild(btn);
   }
 
@@ -614,7 +713,11 @@
   document.addEventListener(
     "keydown",
     function (e) {
-      if (e.altKey && e.shiftKey && (e.key === "p" || e.key === "P")) {
+      if (e.ctrlKey && e.altKey && e.shiftKey && (e.key === "p" || e.key === "P")) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        openPrint();
+      } else if (!e.ctrlKey && e.altKey && e.shiftKey && (e.key === "p" || e.key === "P")) {
         e.preventDefault();
         e.stopImmediatePropagation();
         openPrint();
