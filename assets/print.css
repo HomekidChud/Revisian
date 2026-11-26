@@ -135,7 +135,15 @@
 .rpr-fig { margin: 0.9em 0; text-align: center; break-inside: avoid; page-break-inside: avoid; }
 .rpr-fig img { max-width: 100%; max-height: 110mm; height: auto; }
 .rpr-fig figcaption { margin-top: 0.3em; font-size: 0.85em; color: #444; font-style: italic; }
-.rpr-video { font-size: 0.92em; }
+.rpr-media-ref { display: grid; grid-template-columns: minmax(35mm, 42%) 1fr; gap: 4mm; align-items: center; margin: 0.9em 0; break-inside: avoid; page-break-inside: avoid; }
+.rpr-media-ref img { display: block; width: 100%; max-height: 70mm; object-fit: contain; border: 1px solid #bbb; }
+.rpr-media-ref figcaption { font-size: 0.88em; line-height: 1.45; overflow-wrap: anywhere; }
+.rpr-media-placeholder { min-height: 25mm; display: grid; place-items: center; border: 1px solid #999; background: #eee; font: 700 10pt/1 "Satoshi", system-ui, sans-serif; letter-spacing: .15em; }
+.rpr-media-omitted { font-size: 0.88em; overflow-wrap: anywhere; }
+.rpr-pack-intro { margin: 0.2em 0 1em; padding: 0.6em 0.8em; border-left: 3px solid #777; color: #444; break-inside: avoid; }
+.rpr-source { margin: 1.2em 0; padding-top: 0.6em; border-top: 1px solid #aaa; column-span: all; }
+.rpr-source h3 { margin: 0 0 0.45em; font-size: 1em; }
+.rpr-source pre { max-height: none; }
 
 .rpr-url { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.8em; color: #444; word-break: break-all; }
 

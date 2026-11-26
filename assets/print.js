@@ -91,13 +91,30 @@
 
   function youtubeId(href) {
     var m = String(href || "").match(
-      /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
+      /(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
     );
     return m ? m[1] : null;
   }
 
   function isImageHref(href) {
     return /Special:FilePath|\.(png|jpe?g|gif|webp|avif|svg)(\?|$)/i.test(String(href || ""));
+  }
+
+  function isVideoHref(href) {
+    return /\.(mp4|webm|ogv|mov)(\?|$)/i.test(String(href || ""));
+  }
+
+  function isAudioHref(href) {
+    return /\.(mp3|wav|m4a|oga|ogg)(\?|$)/i.test(String(href || ""));
+  }
+
+  function safeUrl(href) {
+    try {
+      var url = new URL(String(href || ""), window.location.href);
+      return /^(https?:|blob:)$/.test(url.protocol) ? url.href : "";
+    } catch (e) {
+      return "";
+    }
   }
 
   function shortUrl(href) {
@@ -124,31 +141,40 @@
   function mediaOf(el) {
     var found = [];
     var seen = {};
-    Array.prototype.forEach.call(el.querySelectorAll("a[href]"), function (a) {
-      var href = a.getAttribute("href") || "";
-      var id = youtubeId(href);
-      var key = id || href;
+    function add(kind, url, label, poster) {
+      url = safeUrl(url);
+      if (!url) return;
+      var id = youtubeId(url);
+      if (id) kind = "video";
+      var key = id || kind + ":" + url;
       if (seen[key]) return;
-      if (id) {
-        seen[key] = 1;
-        found.push({ kind: "video", url: href });
-      } else if (isImageHref(href) && href.indexOf("http") === 0) {
-        seen[key] = 1;
-        found.push({ kind: "image", url: href });
-      }
+      seen[key] = 1;
+      found.push({ kind: kind, url: url, label: clean(label || ""), poster: safeUrl(poster || ""), id: id });
+    }
+
+    Array.prototype.forEach.call(el.querySelectorAll("a[href]"), function (a) {
+      var href = safeUrl(a.getAttribute("href"));
+      if (youtubeId(href) || isVideoHref(href)) add("video", href, a.textContent);
+      else if (isImageHref(href)) add("image", href, a.textContent);
+      else if (isAudioHref(href)) add("audio", href, a.textContent);
     });
     Array.prototype.forEach.call(el.querySelectorAll("img[src]"), function (img) {
-      var src = img.getAttribute("src");
-      if (src && !seen[src] && src.indexOf("data:image/svg") !== 0) {
-        seen[src] = 1;
-        found.push({ kind: "image", url: img.src });
+      add("image", img.currentSrc || img.src || img.getAttribute("src"), img.alt);
+    });
+    Array.prototype.forEach.call(el.querySelectorAll("video, audio, iframe"), function (media) {
+      var kind = media.tagName.toLowerCase() === "audio" ? "audio" : "video";
+      var src = media.currentSrc || media.src || "";
+      if (!src) {
+        var source = media.querySelector("source[src]");
+        src = source && (source.src || source.getAttribute("src"));
       }
+      add(kind, src, media.getAttribute("aria-label") || media.getAttribute("title"), media.poster);
     });
     return found;
   }
 
-  function mediaHtml(el) {
-    var media = mediaOf(el);
+  function mediaHtml(el, media) {
+    media = media || mediaOf(el);
     if (!media.length) return "";
     var caption = captionOf(el);
     var out = "";
@@ -156,14 +182,18 @@
     media.forEach(function (m, i) {
       if (m.kind === "image" && s.images) {
         out +=
-          '<figure class="rpr-fig"><img src="' + esc(m.url) + '" alt="" loading="eager" referrerpolicy="no-referrer">' +
-          (i === 0 && caption ? "<figcaption>" + esc(caption) + "</figcaption>" : "") +
-          "</figure>";
-      } else if (m.kind === "video") {
+          '<figure class="rpr-fig"><img src="' + esc(m.url) + '" alt="' + esc(m.label) + '" loading="eager" referrerpolicy="no-referrer">' +
+          '<figcaption>' + (m.label ? esc(m.label) + " · " : "") + (i === 0 && caption ? esc(caption) + " · " : "") +
+          '<span class="rpr-url">Image source: ' + esc(m.url) + "</span></figcaption></figure>";
+      } else if (m.kind === "image") {
+        out += '<p class="rpr-media-omitted"><strong>Image:</strong> ' + esc(m.label || (i === 0 ? caption : "")) + ' <span class="rpr-url">' + esc(m.url) + "</span></p>";
+      } else if (m.kind === "video" || m.kind === "audio") {
+        var thumbnail = m.poster || (m.id ? "https://img.youtube.com/vi/" + encodeURIComponent(m.id) + "/hqdefault.jpg" : "");
         out +=
-          '<p class="rpr-video"><strong>Video:</strong> ' +
-          (i === 0 && caption ? esc(caption) + " — " : "") +
-          '<span class="rpr-url">' + esc(shortUrl(m.url)) + "</span></p>";
+          '<figure class="rpr-media-ref">' +
+          (thumbnail && s.images ? '<img src="' + esc(thumbnail) + '" alt="' + esc(m.label || caption || "Media preview") + '" loading="eager" referrerpolicy="no-referrer">' : '<div class="rpr-media-placeholder">' + (m.kind === "video" ? "VIDEO" : "AUDIO") + "</div>") +
+          '<figcaption><strong>' + (m.kind === "video" ? "Video" : "Audio") + ':</strong> ' + esc(m.label || (i === 0 ? caption : "")) +
+          '<br><span class="rpr-url">' + esc(m.url) + "</span></figcaption></figure>";
       }
     });
     return out;
@@ -172,7 +202,37 @@
   /* Copy a node, keeping meaning and dropping anything interactive. */
   function sanitise(node) {
     var tag = node.tagName.toLowerCase();
-    if (/^(button|svg|script|style|iframe|video|audio|input|select|textarea|canvas|noscript)$/.test(tag)) return "";
+    if (tag === "img") {
+      var imageUrl = safeUrl(node.currentSrc || node.src || node.getAttribute("src"));
+      if (!imageUrl) return "";
+      return state.settings.images
+        ? '<figure class="rpr-fig"><img src="' + esc(imageUrl) + '" alt="' + esc(node.getAttribute("alt") || "") + '" loading="eager"><figcaption><span class="rpr-url">Image source: ' + esc(imageUrl) + "</span></figcaption></figure>"
+        : '<p class="rpr-media-omitted">Image omitted by print settings: <span class="rpr-url">' + esc(imageUrl) + "</span></p>";
+    }
+    if (tag === "canvas") {
+      try {
+        var canvasImage = node.toDataURL("image/png");
+        return '<figure class="rpr-fig"><img src="' + esc(canvasImage) + '" alt="Board drawing" loading="eager"><figcaption>Board drawing</figcaption></figure>';
+      } catch (e) {
+        return '<p class="rpr-media-omitted">Canvas drawing could not be captured for printing.</p>';
+      }
+    }
+    if (/^(video|audio|iframe)$/.test(tag)) {
+      var mediaUrl = node.currentSrc || node.src || "";
+      if (!mediaUrl) {
+        var mediaSource = node.querySelector("source[src]");
+        mediaUrl = mediaSource && (mediaSource.src || mediaSource.getAttribute("src"));
+      }
+      mediaUrl = safeUrl(mediaUrl);
+      if (!mediaUrl) return "";
+      var mediaKind = tag === "audio" ? "Audio" : "Video";
+      var mediaId = youtubeId(mediaUrl);
+      var preview = safeUrl(node.poster) || (mediaId ? "https://img.youtube.com/vi/" + encodeURIComponent(mediaId) + "/hqdefault.jpg" : "");
+      return '<figure class="rpr-media-ref">' +
+        (preview && state.settings.images ? '<img src="' + esc(preview) + '" alt="' + esc(node.title || mediaKind + " preview") + '" loading="eager">' : '<div class="rpr-media-placeholder">' + mediaKind.toUpperCase() + "</div>") +
+        '<figcaption><strong>' + mediaKind + ':</strong> ' + esc(node.title || node.getAttribute("aria-label") || "") + '<br><span class="rpr-url">' + esc(mediaUrl) + "</span></figcaption></figure>";
+    }
+    if (/^(svg|script|style|input|select|textarea|noscript)$/.test(tag)) return "";
     if (node.hidden || node.getAttribute("aria-hidden") === "true") return "";
     if (node.matches && node.matches(".media-actions, .media-error, [data-video-id], .video-activate")) return "";
 
@@ -183,13 +243,18 @@
     });
 
     if (tag === "a") {
-      var href = node.getAttribute("href") || "";
+      var href = safeUrl(node.getAttribute("href"));
       var text = clean(node.textContent);
       if (!text) return "";
-      if (state.settings.showUrls && /^https?:/i.test(href) && shortUrl(href) !== text) {
-        return inner + ' <span class="rpr-url">(' + esc(shortUrl(href)) + ")</span>";
+      if (state.settings.showUrls && href && href !== text) {
+        return inner + ' <span class="rpr-url">(' + esc(href) + ")</span>";
       }
       return inner;
+    }
+
+    if (tag === "button") {
+      var destination = node.getAttribute("data-nav-section") || node.getAttribute("data-nav-note") || node.getAttribute("data-wiki") || "";
+      return inner + (destination ? ' <span class="rpr-url">(Revisian destination: ' + esc(destination) + ")</span>" : "");
     }
 
     var keep = /^(p|h1|h2|h3|h4|h5|h6|ul|ol|li|table|thead|tbody|tfoot|tr|th|td|blockquote|pre|code|strong|b|em|i|u|sub|sup|br|hr|mark|small|del|ins)$/;
@@ -233,28 +298,77 @@
     var out = "";
     var firstH1 = true;
     var sectionOpen = false;
-    Array.prototype.forEach.call(data.prose.children, function (el) {
-      var tag = el.tagName.toLowerCase();
-      if (tag === "h1" && firstH1) {
-        firstH1 = false;
-        return;
-      }
-      var hasMedia = !!el.querySelector("a.media-card, .media-card, .media-actions, img") ||
-        (el.matches && el.matches(".media-card"));
-      if (hasMedia) {
-        var m = mediaHtml(el);
-        if (m) {
-          out += m;
+    var seenMedia = {};
+    var restoreMedia = expandPrintMedia(data.prose);
+    try {
+      Array.prototype.forEach.call(data.prose.children, function (el) {
+        var tag = el.tagName.toLowerCase();
+        if (tag === "h1" && firstH1) {
+          firstH1 = false;
           return;
         }
-      }
-      if (tag === "h2" && state.settings.sectionBreaks && sectionOpen) {
-        out += '<div class="rpr-break"></div>';
-      }
-      if (tag === "h2") sectionOpen = true;
-      out += sanitise(el);
-    });
+        var hasMedia = !!el.querySelector("a.media-card, .media-card, .media-actions, img, video, audio, iframe") ||
+          (el.matches && el.matches(".media-card"));
+        if (hasMedia) {
+          var foundMedia = mediaOf(el);
+          if (foundMedia.length) {
+            var uniqueMedia = foundMedia.filter(function (item) {
+              var key = item.id ? "video:" + item.id : item.kind + ":" + item.url;
+              if (seenMedia[key]) return false;
+              seenMedia[key] = true;
+              return true;
+            });
+            if (uniqueMedia.length) out += mediaHtml(el, uniqueMedia);
+            return;
+          }
+        }
+        if (tag === "h2" && state.settings.sectionBreaks && sectionOpen) {
+          out += '<div class="rpr-break"></div>';
+        }
+        if (tag === "h2") sectionOpen = true;
+        out += sanitise(el);
+      });
+    } finally {
+      restoreMedia();
+    }
     return out;
+  }
+
+  function sourceHtml() {
+    var article = document.querySelector("main article");
+    var sourceTab = article && article.querySelector('.doc-tabs button[data-action="source"]');
+    if (!sourceTab) return "";
+    var wasSource = sourceTab.getAttribute("aria-pressed") === "true";
+    if (!wasSource) sourceTab.click();
+    var sourceArticle = document.querySelector("main article");
+    var raw = sourceArticle && sourceArticle.querySelector(".raw");
+    var link = sourceArticle && sourceArticle.querySelector(".source-desc a[href]");
+    var rawText = String(raw && raw.textContent || "").replace(/\r\n?/g, "\n").trim();
+    var href = safeUrl(link && link.getAttribute("href"));
+    var label = clean(link && link.textContent);
+    var html = rawText || href
+      ? '<section class="rpr-source"><h3>Imported source material</h3>' +
+        (href ? '<p><strong>Source page:</strong> ' + esc(label || href) + '<br><span class="rpr-url">' + esc(href) + '</span></p>' : "") +
+        (rawText ? '<pre>' + esc(rawText) + '</pre>' : "") + '</section>'
+      : "";
+    var readingTab = sourceArticle && sourceArticle.querySelector('.doc-tabs button[data-action="reading"]');
+    if (!wasSource && readingTab) readingTab.click();
+    return html;
+  }
+
+  /* Expand collapsed local video/audio attachments briefly so their blob URLs
+     can be copied into the print document, then return the note to its prior state. */
+  function expandPrintMedia(prose) {
+    var opened = [];
+    Array.prototype.forEach.call(prose.querySelectorAll(".media-card button[data-media]"), function (button) {
+      if (button.getAttribute("aria-expanded") === "true" || button.hidden) return;
+      if (!/load\s+(video|audio)/i.test(button.textContent || "")) return;
+      button.click();
+      if (button.getAttribute("aria-expanded") === "true") opened.push(button);
+    });
+    return function () {
+      opened.forEach(function (button) { if (button.isConnected) button.click(); });
+    };
   }
 
   /* Read every member through Revisian's own delegated pack navigation. */
@@ -285,7 +399,12 @@
     }
     if (!buttons || !buttons.length) return [];
     var packHeading = article.querySelector("h1");
-    state.packInfo = packHeading ? { title: clean(packHeading.textContent), subject: (article.querySelector(".doc-meta .pill") || {}).textContent || "" } : null;
+    var packDescription = article.querySelector(".pack-banner p");
+    state.packInfo = packHeading ? {
+      title: clean(packHeading.textContent),
+      subject: (article.querySelector(".doc-meta .pill") || {}).textContent || "",
+      description: clean(packDescription && packDescription.textContent)
+    } : null;
     var actions = Array.prototype.map.call(buttons, function (button) {
       return button.getAttribute("data-action");
     });
@@ -294,14 +413,16 @@
       dispatchAppAction(action);
       var note = readNote();
       if (note) {
-        items.push({ title: note.title, subject: note.subject, html: bodyHtml(note), terms: note.terms.slice() });
+        items.push({ title: note.title, subject: note.subject, html: bodyHtml(note) + sourceHtml(), terms: note.terms.slice() });
       } else {
-        var memberArticle = document.querySelector("main article");
-        var memberTitle = memberArticle && memberArticle.querySelector("h1");
-        if (!memberArticle || !memberTitle) throw new Error("A pack member could not be rendered for printing.");
-        var memberCopy = memberArticle.cloneNode(true);
-        Array.prototype.forEach.call(memberCopy.querySelectorAll("h1, button, svg, script, style, input, textarea"), function (el) { el.remove(); });
-        items.push({ title: clean(memberTitle.textContent), subject: "", html: sanitise(memberCopy), terms: [] });
+        var memberRoot = document.querySelector("main article") || document.querySelector("main");
+        var memberTitle = memberRoot && memberRoot.querySelector("h1");
+        if (!memberRoot || !memberTitle) throw new Error("A pack member could not be rendered for printing.");
+        var titleText = clean(memberTitle.textContent);
+        var memberCopy = memberRoot.cloneNode(true);
+        Array.prototype.forEach.call(memberCopy.querySelectorAll("h1, .doc-tabs, .doc-actions, .pack-heading-actions, .field-back, .board-toolbar, .board-controls, [role=toolbar], script, style, input, select, textarea, [hidden]"), function (el) { el.remove(); });
+        var content = memberCopy.querySelector(".board-canvas, .board-surface, .board-layout, .prose") || memberCopy;
+        items.push({ title: titleText, subject: "", html: sanitise(content), terms: [] });
       }
       var back = document.querySelector('main article .field-back button[data-action^="open:"]');
       if (!back) throw new Error("Pack navigation could not return to the pack.");
@@ -378,6 +499,7 @@
         html += "<h1>" + esc(data.title) + "</h1>";
       }
       html += "</header><div class=\"rpr-pack-contents\">";
+      if (!s.cover && state.packInfo.description) html += '<p class="rpr-pack-intro">' + esc(state.packInfo.description) + "</p>";
       state.packData.forEach(function (item, index) {
         html += '<section class="rpr-pack-item' + (index ? " rpr-pack-page" : "") + '">';
         if (item.subject) html += '<p class="rpr-kicker">' + esc(item.subject) + "</p>";
@@ -395,7 +517,7 @@
       html += "<h1>" + esc(data.title) + "</h1>";
     }
     html += "</header>";
-    html += '<div class="rpr-body">' + bodyHtml(data) + "</div>";
+    html += '<div class="rpr-body">' + bodyHtml(data) + sourceHtml() + "</div>";
     if (s.keyTerms) html += termsHtml(data);
     html += "</article>";
     return html;

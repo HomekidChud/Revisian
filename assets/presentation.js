@@ -58,13 +58,26 @@
 
   function youtubeId(href) {
     var m = String(href || "").match(
-      /(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
+      /(?:youtube(?:-nocookie)?\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{6,})/
     );
+    return m ? m[1] : null;
+  }
+
+  function vimeoId(href) {
+    var m = String(href || "").match(/(?:vimeo\.com)\/(?:video\/)?(\d+)/i);
     return m ? m[1] : null;
   }
 
   function isImageHref(href) {
     return /Special:FilePath|\.(png|jpe?g|gif|webp|avif|svg)(\?|$)/i.test(String(href || ""));
+  }
+
+  function isVideoHref(href) {
+    return /\.(mp4|webm|ogv|mov)(\?|$)/i.test(String(href || ""));
+  }
+
+  function isAudioHref(href) {
+    return /\.(mp3|wav|m4a|oga|ogg)(\?|$)/i.test(String(href || ""));
   }
 
   /* ------------------------------------------------------------------ *
@@ -74,21 +87,60 @@
   function mediaFrom(el) {
     var found = [];
     var seen = {};
-    var scope = el.querySelectorAll(".media-actions a[href], .video-activate a[href], a[href]");
-    Array.prototype.forEach.call(scope, function (a) {
-      var href = a.getAttribute("href") || "";
-      var id = youtubeId(href);
-      var key = id || href;
+    function add(kind, href, label, poster) {
+      var url;
+      try { url = new URL(String(href || ""), window.location.href); } catch (e) { return; }
+      if (!/^(https?:|blob:)$/.test(url.protocol)) return;
+      var youtube = youtubeId(url.href);
+      var vimeo = vimeoId(url.href);
+      var id = youtube || vimeo;
+      var provider = youtube ? "youtube" : vimeo ? "vimeo" : "";
+      if (id) kind = "video";
+      var key = id || kind + ":" + url.href;
       if (seen[key]) return;
-      if (id) {
-        seen[key] = 1;
-        found.push({ kind: "video", id: id, url: href });
-      } else if (isImageHref(href) && href.indexOf("http") === 0) {
-        seen[key] = 1;
-        found.push({ kind: "image", url: href });
+      seen[key] = 1;
+      found.push({ kind: kind, id: id, provider: provider, url: url.href, label: clean(label || ""), poster: poster || "" });
+    }
+    Array.prototype.forEach.call(el.querySelectorAll("a[href]"), function (a) {
+      var href = a.getAttribute("href") || "";
+      if (youtubeId(href) || vimeoId(href) || isVideoHref(href)) add("video", href, a.textContent);
+      else if (isImageHref(href)) add("image", href, a.textContent);
+      else if (isAudioHref(href)) add("audio", href, a.textContent);
+    });
+    Array.prototype.forEach.call(el.querySelectorAll("img[src]"), function (img) {
+      add("image", img.currentSrc || img.src || img.getAttribute("src"), img.alt);
+    });
+    Array.prototype.forEach.call(el.querySelectorAll("video, audio, iframe"), function (media) {
+      var tag = media.tagName.toLowerCase();
+      var src = media.currentSrc || media.src || "";
+      if (!src) {
+        var source = media.querySelector("source[src]");
+        src = source && (source.src || source.getAttribute("src"));
       }
+      add(tag === "audio" ? "audio" : "video", src, media.getAttribute("aria-label") || media.title, media.poster);
     });
     return found;
+  }
+
+  function linksFrom(el) {
+    var links = [];
+    var seen = {};
+    Array.prototype.forEach.call(el.querySelectorAll("a[href]"), function (a) {
+      var href = a.getAttribute("href") || "";
+      try {
+        var url = new URL(href, window.location.href);
+        if (!/^https?:$/.test(url.protocol)) return;
+        var label = clean(a.textContent) || url.hostname;
+        if (!seen[url.href]) { seen[url.href] = 1; links.push({ label: label, url: url.href }); }
+      } catch (e) { /* Ignore malformed or non-web links. */ }
+    });
+    Array.prototype.forEach.call(el.querySelectorAll("button[data-nav-note], button[data-nav-section], button[data-wiki]"), function (button) {
+      var target = button.getAttribute("data-nav-note") || button.getAttribute("data-nav-section") || button.getAttribute("data-wiki") || "";
+      var label = clean(button.textContent);
+      var key = "revisian:" + target;
+      if (target && !seen[key]) { seen[key] = 1; links.push({ label: label || target, url: key }); }
+    });
+    return links;
   }
 
   function captionFrom(el) {
@@ -188,6 +240,19 @@
     });
     if (current.blocks.length || current.heading) sections.push(current);
     sections = sections.filter(function (s) { return s.blocks.length; });
+    var seenMedia = {};
+    sections.forEach(function (section) {
+      section.blocks = section.blocks.filter(function (block) {
+        if (block.type !== "media") return true;
+        block.media = block.media.filter(function (media) {
+          var key = media.id ? "video:" + (media.provider || "") + ":" + media.id : media.kind + ":" + media.url;
+          if (seenMedia[key]) return false;
+          seenMedia[key] = true;
+          return true;
+        });
+        return block.media.length > 0;
+      });
+    });
 
     /* Key terms: the note's own emphasis. */
     var terms = [];
@@ -206,7 +271,8 @@
       subject: subject,
       sections: sections,
       terms: terms.slice(0, 12),
-      intro: sections.length && sections[0].heading ? firstText(sections[0]) : ""
+      intro: sections.length && sections[0].heading ? firstText(sections[0]) : "",
+      links: linksFrom(prose)
     };
   }
 
@@ -318,7 +384,7 @@
         if (block.type === "media") {
           block.media.forEach(function (m, mi) {
             slides.push({
-              kind: m.kind === "video" ? "video" : "image",
+              kind: m.kind === "frame" ? "video" : m.kind,
               sec: secMeta.sec,
               secTotal: secMeta.secTotal,
               title: usedHeading ? heading + " (cont.)" : heading,
@@ -332,6 +398,12 @@
 
       flushText();
     });
+
+    if (note.links && note.links.length) {
+      chunk(note.links, 7).forEach(function (group) {
+        slides.push({ kind: "sources", title: "Links and destinations", items: group });
+      });
+    }
 
     if (note.terms.length >= 3) {
       slides.push({
@@ -354,7 +426,9 @@
     if (slide.kind === "section") return [slide.note || "Section " + slide.number + " of " + slide.total + "."];
     if (slide.kind === "table") return ["Read the table across, not down: one row at a time, linking each component to its job."];
     if (slide.kind === "image") return [slide.caption || "Name the parts of the diagram before you explain it."];
-    if (slide.kind === "video") return [slide.caption || "Play a minute, pause, and say what you just saw."];
+    if (slide.kind === "video") return [slide.caption || "Play a minute, pause, and say what you just saw.", slide.media.url];
+    if (slide.kind === "audio") return [slide.caption || "Listen carefully, then explain the key idea.", slide.media.url];
+    if (slide.kind === "sources") return slide.items.map(function (item) { return item.label + " — " + item.url; });
     if (slide.kind === "recap") return ["Point at each term. Say the definition out loud, then check it against the source note."];
     if (slide.kind === "blurt") return ["Two minutes, pen down, no notes. Then compare with the recap slide."];
     return (slide.items || []).map(function (i) { return clean(String(i).replace(/<[^>]+>/g, "")); });
@@ -437,11 +511,12 @@
       );
     }
 
-    if (s.kind === "image" || s.kind === "video") {
-      var body =
-        s.kind === "image"
-          ? '<div class="rp-figure"><img src="' + esc(s.media.url) + '" alt="' + esc(s.caption || s.title) + '"></div>'
-          : '<div class="rp-figure"><div class="rp-frame" data-video-id="' + esc(s.media.id) + '"></div></div>';
+    if (s.kind === "image" || s.kind === "video" || s.kind === "audio") {
+      var body = s.kind === "image"
+        ? '<div class="rp-figure"><img src="' + esc(s.media.url) + '" alt="' + esc(s.caption || s.title) + '"></div>'
+        : s.kind === "video" && s.media.id
+        ? '<div class="rp-figure"><div class="rp-frame" data-video-id="' + esc(s.media.id) + '" data-video-provider="' + esc(s.media.provider || "youtube") + '"></div></div>'
+        : '<div class="rp-figure"><' + s.kind + ' class="rp-native-media" controls preload="metadata"' + (s.media.poster ? ' poster="' + esc(s.media.poster) + '"' : '') + '><source src="' + esc(s.media.url) + '"></' + s.kind + '></div>';
       return (
         '<div class="rp-slide" data-kind="' + s.kind + '">' +
         kicker +
@@ -450,6 +525,15 @@
         (s.caption ? '<div class="rp-caption">' + esc(s.caption) + "</div>" : "") +
         "</div>"
       );
+    }
+
+    if (s.kind === "sources") {
+      return '<div class="rp-slide" data-kind="sources"><div class="rp-kicker"><b>Reference list</b></div>' +
+        '<h2 class="rp-title">' + esc(s.title) + '</h2><ul class="rp-sources">' +
+        s.items.map(function (item) {
+          var href = /^https?:\/\//i.test(item.url) ? '<a href="' + esc(item.url) + '" target="_blank" rel="noopener noreferrer">' + esc(item.url) + '</a>' : '<code>' + esc(item.url) + '</code>';
+          return '<li><strong>' + esc(item.label) + '</strong><br>' + href + '</li>';
+        }).join("") + '</ul></div>';
     }
 
     if (s.kind === "recap") {
@@ -499,6 +583,7 @@
     root.setAttribute("role", "dialog");
     root.setAttribute("aria-modal", "true");
     root.setAttribute("aria-label", "Presentation mode: " + note.title);
+    root.setAttribute("tabindex", "-1");
 
     var slidesHtml = state.slides.map(slideHtml).join("");
     var gridItems = state.slides
@@ -569,8 +654,11 @@
         var frame = el.querySelector("[data-video-id]");
         if (frame && !frame.querySelector("iframe")) {
           var id = frame.getAttribute("data-video-id");
+          var provider = frame.getAttribute("data-video-provider");
           var iframe = document.createElement("iframe");
-          iframe.src = "https://www.youtube-nocookie.com/embed/" + id + "?playsinline=1&rel=0";
+          iframe.src = provider === "vimeo"
+            ? "https://player.vimeo.com/video/" + encodeURIComponent(id) + "?dnt=1"
+            : "https://www.youtube-nocookie.com/embed/" + encodeURIComponent(id) + "?playsinline=1&rel=0";
           iframe.allow = "accelerometer; autoplay; clipboard-write; encrypted-media; picture-in-picture";
           iframe.allowFullscreen = true;
           iframe.loading = "lazy";
@@ -623,6 +711,7 @@
     document.documentElement.style.overflow = state.prevOverflow || "";
     document.removeEventListener("keydown", onKey, true);
     document.removeEventListener("mousemove", wake, true);
+    window.removeEventListener("resize", fit);
     clearTimeout(idleTimer);
     if (document.fullscreenElement) document.exitFullscreen().catch(function () {});
   }
@@ -631,6 +720,7 @@
     if (!state.root) return;
     var k = e.key;
     if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName) && !e.target.closest(".rp-root")) return;
+    if ((k === " " || k === "Enter") && e.target && e.target.closest && e.target.closest("button, a, input, select, textarea")) return;
 
     if (k === "Escape") {
       if (state.gridOn) { e.preventDefault(); e.stopPropagation(); toggleGrid(false); return; }
@@ -676,8 +766,85 @@
     }, 1000);
   }
 
+  function dispatchAppAction(action) {
+    var button = document.createElement("button");
+    button.type = "button";
+    button.hidden = true;
+    button.setAttribute("data-action", action);
+    document.body.appendChild(button);
+    button.click();
+    button.remove();
+  }
+
+  function analysePack() {
+    var article = document.querySelector("main article");
+    if (!article) return null;
+    var buttons = article.querySelectorAll('.pack-contents button[data-action^="pack-item:"]');
+    var restoreTitle = "";
+    if (!buttons.length) {
+      var back = article.querySelector('.field-back button[data-action^="open:"]');
+      var openAction = back && back.getAttribute("data-action");
+      var openTitle = article.querySelector("h1");
+      if (!openAction || !openTitle) return null;
+      restoreTitle = clean(openTitle.textContent);
+      dispatchAppAction(openAction);
+      article = document.querySelector("main article");
+      buttons = article && article.querySelectorAll('.pack-contents button[data-action^="pack-item:"]');
+    }
+    if (!buttons || !buttons.length) return null;
+
+    var title = clean((article.querySelector("h1") || {}).textContent || "Revision pack");
+    var subject = clean((article.querySelector(".doc-meta .pill") || {}).textContent);
+    var description = clean((article.querySelector(".pack-banner p") || {}).textContent);
+    var actions = Array.prototype.map.call(buttons, function (button) { return button.getAttribute("data-action"); });
+    var sections = [];
+    var terms = [];
+    var links = [];
+
+    actions.forEach(function (action) {
+      dispatchAppAction(action);
+      var member = analyse();
+      if (member && member.sections.length) {
+        member.sections.forEach(function (section) {
+          sections.push({ heading: member.title + (section.heading ? " · " + section.heading : ""), blocks: section.blocks });
+        });
+        member.terms.forEach(function (term) { if (terms.indexOf(term) < 0) terms.push(term); });
+        member.links.forEach(function (link) { if (!links.some(function (old) { return old.url === link.url; })) links.push(link); });
+      } else {
+        var memberRoot = document.querySelector("main article") || document.querySelector("main");
+        var memberTitle = memberRoot && memberRoot.querySelector("h1");
+        var boardCopy = memberRoot && memberRoot.cloneNode(true);
+        if (boardCopy) Array.prototype.forEach.call(boardCopy.querySelectorAll(".doc-tabs, .doc-actions, .field-back, .board-toolbar, .board-controls, [role=toolbar], button, input, select, textarea, script, style"), function (el) { el.remove(); });
+        var summary = boardCopy ? clean(boardCopy.innerText || boardCopy.textContent).slice(0, 1200) : "";
+        if (memberTitle && summary) sections.push({ heading: clean(memberTitle.textContent) + " · Board overview", blocks: [{ type: "text", text: summary, html: esc(summary) }] });
+        if (memberRoot) {
+          var boardMedia = mediaFrom(memberRoot);
+          Array.prototype.forEach.call(memberRoot.querySelectorAll("canvas"), function (canvas) {
+            try { boardMedia.push({ kind: "image", url: canvas.toDataURL("image/png"), label: "Board drawing", provider: "", id: null, poster: "" }); } catch (e) { /* Protected canvas; keep the textual board overview. */ }
+          });
+          if (boardMedia.length) sections.push({ heading: clean((memberTitle || {}).textContent || "Board") + " · Board media", blocks: [{ type: "media", media: boardMedia, caption: "Media and drawings from this board." }] });
+          linksFrom(memberRoot).forEach(function (link) { if (!links.some(function (old) { return old.url === link.url; })) links.push(link); });
+        }
+      }
+      var returnButton = document.querySelector('main article .field-back button[data-action^="open:"]');
+      if (!returnButton) throw new Error("Could not return to the pack overview while building the presentation.");
+      dispatchAppAction(returnButton.getAttribute("data-action"));
+    });
+
+    if (restoreTitle) {
+      var packButtons = document.querySelectorAll('main article .pack-contents button[data-action^="pack-item:"]');
+      var restore = Array.prototype.find.call(packButtons, function (button) {
+        var label = button.querySelector("strong");
+        return label && clean(label.textContent) === restoreTitle;
+      });
+      if (restore) dispatchAppAction(restore.getAttribute("data-action"));
+    }
+    if (!sections.length) return null;
+    return { title: title, subject: subject, intro: description || (actions.length + " items in this revision pack."), sections: sections, terms: terms.slice(0, 12), links: links };
+  }
+
   function openDeck() {
-    var note = analyse();
+    var note = analysePack() || analyse();
     if (!note || !note.sections.length) {
       toast("Open a text note first — presentation mode builds slides from the note body.");
       return;
